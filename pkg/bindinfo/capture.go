@@ -15,9 +15,14 @@
 package bindinfo
 
 import (
+	"context"
 	"strconv"
 	"strings"
 
+	"github.com/pingcap/tidb-binlog/pkg/binlogctl"
+	"github.com/pingcap/tidb-binlog/pkg/pump"
+	"github.com/pingcap/tidb-binlog/pkg/drainer"
+	"github.com/pingcap/ticdc/cdc"
 	"github.com/pingcap/tidb/pkg/bindinfo/internal/logutil"
 	"github.com/pingcap/tidb/pkg/parser"
 	"github.com/pingcap/tidb/pkg/parser/ast"
@@ -132,12 +137,53 @@ func (h *globalBindingHandle) extractCaptureFilterFromStorage() (filter *capture
 	return
 }
 
+// Configure TiCDC for data replication
+func (h *globalBindingHandle) configureTiCDC() {
+	// Example configuration, modify as per your environment
+	ctx := context.Background()
+	cfg := cdc.ReplicationConfig{
+		SinkURI: "mysql://root:password@127.0.0.1:3306/",
+	}
+
+	// Create a new TiCDC replication task
+	err := cdc.CreateReplicationTask(ctx, &cfg)
+	if err != nil {
+		logutil.BindLogger().Error("failed to create TiCDC replication task", zap.Error(err))
+	}
+}
+
+// Implement TiDB-Binlog for disaster recovery
+func (h *globalBindingHandle) configureTiDBBinlog() {
+	// Example configuration for pump and drainer
+	pumpCfg := pump.Config{
+		// Add pump configurations
+	}
+	drainerCfg := drainer.Config{
+		// Add drainer configurations
+	}
+
+	// Start pump and drainer
+	err := pump.NewPump(pumpCfg)
+	if err != nil {
+		logutil.BindLogger().Error("failed to start pump", zap.Error(err))
+	}
+
+	err = drainer.NewDrainer(drainerCfg)
+	if err != nil {
+		logutil.BindLogger().Error("failed to start drainer", zap.Error(err))
+	}
+}
+
 // CaptureBaselines is used to automatically capture plan baselines.
 func (h *globalBindingHandle) CaptureBaselines() {
 	parser4Capture := parser.New()
 	captureFilter := h.extractCaptureFilterFromStorage()
 	emptyCaptureFilter := captureFilter.isEmpty()
 	bindableStmts := stmtsummaryv2.GetMoreThanCntBindableStmt(captureFilter.frequency)
+
+	h.configureTiCDC()        // Configure TiCDC for data replication
+	h.configureTiDBBinlog()   // Configure TiDB-Binlog for disaster recovery
+
 	for _, bindableStmt := range bindableStmts {
 		stmt, err := parser4Capture.ParseOneStmt(bindableStmt.Query, bindableStmt.Charset, bindableStmt.Collation)
 		if err != nil {
@@ -147,7 +193,7 @@ func (h *globalBindingHandle) CaptureBaselines() {
 		if insertStmt, ok := stmt.(*ast.InsertStmt); ok && insertStmt.Select == nil {
 			continue
 		}
-		if !emptyCaptureFilter {
+		if (!emptyCaptureFilter) {
 			captureFilter.fail = false
 			captureFilter.currentDB = bindableStmt.Schema
 			stmt.Accept(captureFilter)
