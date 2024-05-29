@@ -60,7 +60,7 @@ type Manager interface {
 	Cancel()
 	// RequireOwner requires the ownerManager is owner.
 	RequireOwner(ctx context.Context) error
-	// CampaignCancel cancels one etcd campaign
+	// CampaignCancel cancels one etcd campaign.
 	CampaignCancel()
 
 	// SetBeOwnerHook sets a hook. The hook is called before becoming an owner.
