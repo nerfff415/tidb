@@ -3010,29 +3010,8 @@ func (d *ddl) BatchCreateTableWithInfo(ctx sessionctx.Context,
 	return d.callHookOnChanged(jobs, err)
 }
 
-// BuildQueryStringFromJobs takes a slice of Jobs and concatenates their
-// queries into a single query string.
-// Each query is separated by a semicolon and a space.
-// Trailing spaces are removed from each query, and a semicolon is appended
-// if it's not already present.
-func BuildQueryStringFromJobs(jobs []*model.Job) string {
-	var queryBuilder strings.Builder
-	for i, job := range jobs {
-		q := strings.TrimSpace(job.Query)
-		if !strings.HasSuffix(q, ";") {
-			q += ";"
-		}
-		queryBuilder.WriteString(q)
-
-		if i < len(jobs)-1 {
-			queryBuilder.WriteString(" ")
-		}
-	}
-	return queryBuilder.String()
-}
-
 // BatchCreateTableWithJobs combine CreateTableJobs to BatchCreateTableJob.
-func BatchCreateTableWithJobs(jobs []*model.Job) (*model.Job, error) {
+func (*ddl) BatchCreateTableWithJobs(jobs []*model.Job) (*model.Job, error) {
 	if len(jobs) == 0 {
 		return nil, errors.Trace(fmt.Errorf("expect non-empty jobs"))
 	}
@@ -3076,7 +3055,6 @@ func BatchCreateTableWithJobs(jobs []*model.Job) (*model.Job, error) {
 	combinedJob.Args = append(combinedJob.Args, args)
 	combinedJob.Args = append(combinedJob.Args, foreignKeyChecks)
 	combinedJob.InvolvingSchemaInfo = involvingSchemaInfo
-	combinedJob.Query = BuildQueryStringFromJobs(jobs)
 
 	return combinedJob, nil
 }
@@ -7682,12 +7660,6 @@ func (d *ddl) createIndex(ctx sessionctx.Context, ti ast.Ident, keyType ast.Inde
 	finalColumns := make([]*model.ColumnInfo, len(tblInfo.Columns), len(tblInfo.Columns)+len(hiddenCols))
 	copy(finalColumns, tblInfo.Columns)
 	finalColumns = append(finalColumns, hiddenCols...)
-	// Check before the job is put to the queue.
-	// This check is redundant, but useful. If DDL check fail before the job is put
-	// to job queue, the fail path logic is super fast.
-	// After DDL job is put to the queue, and if the check fail, TiDB will run the DDL cancel logic.
-	// The recover step causes DDL wait a few seconds, makes the unit test painfully slow.
-	// For same reason, decide whether index is global here.
 	indexColumns, _, err := buildIndexColumns(ctx, finalColumns, indexPartSpecifications)
 	if err != nil {
 		return errors.Trace(err)
@@ -8343,7 +8315,6 @@ func (d *ddl) LockTables(ctx sessionctx.Context, stmt *ast.LockTablesStmt) error
 		InvolvingSchemaInfo: involveSchemaInfo,
 		SQLMode:             ctx.GetSessionVars().SQLMode,
 	}
-	// AddTableLock here is avoiding this job was executed successfully but the session was killed before return.
 	ctx.AddTableLock(lockTables)
 	err := d.DoDDLJob(ctx, job)
 	if err == nil {
@@ -8354,7 +8325,6 @@ func (d *ddl) LockTables(ctx sessionctx.Context, stmt *ast.LockTablesStmt) error
 	return errors.Trace(err)
 }
 
-// UnlockTables uses to execute unlock tables statement.
 func (d *ddl) UnlockTables(ctx sessionctx.Context, unlockTables []model.TableLockTpInfo) error {
 	if len(unlockTables) == 0 {
 		return nil
@@ -8384,7 +8354,6 @@ func (d *ddl) UnlockTables(ctx sessionctx.Context, unlockTables []model.TableLoc
 	return errors.Trace(err)
 }
 
-// CleanDeadTableLock uses to clean dead table locks.
 func (d *ddl) CleanDeadTableLock(unlockTables []model.TableLockTpInfo, se model.SessionInfo) error {
 	if len(unlockTables) == 0 {
 		return nil
@@ -8425,7 +8394,6 @@ func (d *ddl) CleanupTableLock(ctx sessionctx.Context, tables []*ast.TableName) 
 	uniqueTableID := make(map[int64]struct{})
 	cleanupTables := make([]model.TableLockTpInfo, 0, len(tables))
 	unlockedTablesNum := 0
-	// Check whether the table was already locked by another.
 	for _, tb := range tables {
 		err := throwErrIfInMemOrSysDB(ctx, tb.Schema.L)
 		if err != nil {
@@ -8438,10 +8406,6 @@ func (d *ddl) CleanupTableLock(ctx sessionctx.Context, tables []*ast.TableName) 
 		if t.Meta().IsView() || t.Meta().IsSequence() {
 			return table.ErrUnsupportedOp
 		}
-		// Maybe the table t was not locked, but still try to unlock this table.
-		// If we skip unlock the table here, the job maybe not consistent with the job.Query.
-		// eg: unlock tables t1,t2;  If t2 is not locked and skip here, then the job will only unlock table t1,
-		// and this behaviour is not consistent with the sql query.
 		if !t.Meta().IsLocked() {
 			unlockedTablesNum++
 		}
@@ -8451,7 +8415,6 @@ func (d *ddl) CleanupTableLock(ctx sessionctx.Context, tables []*ast.TableName) 
 		uniqueTableID[t.Meta().ID] = struct{}{}
 		cleanupTables = append(cleanupTables, model.TableLockTpInfo{SchemaID: schema.ID, TableID: t.Meta().ID})
 	}
-	// If the num of cleanupTables is 0, or all cleanupTables is unlocked, just return here.
 	if len(cleanupTables) == 0 || len(cleanupTables) == unlockedTablesNum {
 		return nil
 	}
@@ -8477,7 +8440,6 @@ func (d *ddl) CleanupTableLock(ctx sessionctx.Context, tables []*ast.TableName) 
 	return errors.Trace(err)
 }
 
-// LockTablesArg is the argument for LockTables, export for test.
 type LockTablesArg struct {
 	LockTables    []model.TableLockTpInfo
 	IndexOfLock   int
@@ -8488,7 +8450,6 @@ type LockTablesArg struct {
 }
 
 func (d *ddl) RepairTable(ctx sessionctx.Context, createStmt *ast.CreateTableStmt) error {
-	// Existence of DB and table has been checked in the preprocessor.
 	oldTableInfo, ok := (ctx.Value(domainutil.RepairedTable)).(*model.TableInfo)
 	if !ok || oldTableInfo == nil {
 		return dbterror.ErrRepairTableFail.GenWithStack("Failed to get the repaired table")
@@ -8497,24 +8458,18 @@ func (d *ddl) RepairTable(ctx sessionctx.Context, createStmt *ast.CreateTableStm
 	if !ok || oldDBInfo == nil {
 		return dbterror.ErrRepairTableFail.GenWithStack("Failed to get the repaired database")
 	}
-	// By now only support same DB repair.
 	if createStmt.Table.Schema.L != oldDBInfo.Name.L {
 		return dbterror.ErrRepairTableFail.GenWithStack("Repaired table should in same database with the old one")
 	}
-
-	// It is necessary to specify the table.ID and partition.ID manually.
 	newTableInfo, err := buildTableInfoWithCheck(ctx, createStmt, oldTableInfo.Charset, oldTableInfo.Collate, oldTableInfo.PlacementPolicyRef)
 	if err != nil {
 		return errors.Trace(err)
 	}
-	// Override newTableInfo with oldTableInfo's element necessary.
-	// TODO: There may be more element assignments here, and the new TableInfo should be verified with the actual data.
 	newTableInfo.ID = oldTableInfo.ID
 	if err = checkAndOverridePartitionID(newTableInfo, oldTableInfo); err != nil {
 		return err
 	}
 	newTableInfo.AutoIncID = oldTableInfo.AutoIncID
-	// If any old columnInfo has lost, that means the old column ID lost too, repair failed.
 	for i, newOne := range newTableInfo.Columns {
 		old := oldTableInfo.FindPublicColumnByName(newOne.Name.L)
 		if old == nil {
@@ -8528,7 +8483,6 @@ func (d *ddl) RepairTable(ctx sessionctx.Context, createStmt *ast.CreateTableStm
 		}
 		newTableInfo.Columns[i].ID = old.ID
 	}
-	// If any old indexInfo has lost, that means the index ID lost too, so did the data, repair failed.
 	for i, newOne := range newTableInfo.Indices {
 		old := getIndexInfoByNameAndColumn(oldTableInfo, newOne)
 		if old == nil {
@@ -8560,7 +8514,6 @@ func (d *ddl) RepairTable(ctx sessionctx.Context, createStmt *ast.CreateTableStm
 	}
 	err = d.DoDDLJob(ctx, job)
 	if err == nil {
-		// Remove the old TableInfo from repairInfo before domain reload.
 		domainutil.RepairInfo.RemoveFromRepairInfo(oldDBInfo.Name.L, oldTableInfo.Name.L)
 	}
 	err = d.callHookOnChanged(job, err)
@@ -8584,7 +8537,6 @@ func (d *ddl) CreateSequence(ctx sessionctx.Context, stmt *ast.CreateSequenceStm
 	if err != nil {
 		return err
 	}
-	// TiDB describe the sequence within a tableInfo, as a same-level object of a table and view.
 	tbInfo, err := BuildTableInfo(ctx, ident.Name, nil, nil, "", "")
 	if err != nil {
 		return err
@@ -8602,12 +8554,10 @@ func (d *ddl) CreateSequence(ctx sessionctx.Context, stmt *ast.CreateSequenceStm
 func (d *ddl) AlterSequence(ctx sessionctx.Context, stmt *ast.AlterSequenceStmt) error {
 	ident := ast.Ident{Name: stmt.Name.Name, Schema: stmt.Name.Schema}
 	is := d.GetInfoSchemaWithInterceptor(ctx)
-	// Check schema existence.
 	db, ok := is.SchemaByName(ident.Schema)
 	if !ok {
 		return infoschema.ErrDatabaseNotExists.GenWithStackByArgs(ident.Schema)
 	}
-	// Check table existence.
 	tbl, err := is.TableByName(ident.Schema, ident.Name)
 	if err != nil {
 		if stmt.IfExists {
@@ -8619,8 +8569,6 @@ func (d *ddl) AlterSequence(ctx sessionctx.Context, stmt *ast.AlterSequenceStmt)
 	if !tbl.Meta().IsSequence() {
 		return dbterror.ErrWrongObject.GenWithStackByArgs(ident.Schema, ident.Name, "SEQUENCE")
 	}
-
-	// Validate the new sequence option value in old sequenceInfo.
 	oldSequenceInfo := tbl.Meta().Sequence
 	copySequenceInfo := *oldSequenceInfo
 	_, _, err = alterSequenceOptions(stmt.SeqOptions, ident, &copySequenceInfo)
@@ -8951,7 +8899,6 @@ func checkIgnorePlacementDDL(ctx sessionctx.Context) bool {
 	return false
 }
 
-// AddResourceGroup implements the DDL interface, creates a resource group.
 func (d *ddl) AddResourceGroup(ctx sessionctx.Context, stmt *ast.CreateResourceGroupStmt) (err error) {
 	groupName := stmt.ResourceGroupName
 	groupInfo := &model.ResourceGroupInfo{Name: groupName, ResourceGroupSettings: model.NewResourceGroupSettings()}
@@ -9002,14 +8949,12 @@ func (*ddl) checkResourceGroupValidation(groupInfo *model.ResourceGroupInfo) err
 	return err
 }
 
-// DropResourceGroup implements the DDL interface.
 func (d *ddl) DropResourceGroup(ctx sessionctx.Context, stmt *ast.DropResourceGroupStmt) (err error) {
 	groupName := stmt.ResourceGroupName
 	if groupName.L == rg.DefaultResourceGroupName {
 		return resourcegroup.ErrDroppingInternalResourceGroup
 	}
 	is := d.GetInfoSchemaWithInterceptor(ctx)
-	// Check group existence.
 	group, ok := is.ResourceGroupByName(groupName)
 	if !ok {
 		err = infoschema.ErrResourceGroupNotExists.GenWithStackByArgs(groupName)
@@ -9019,8 +8964,6 @@ func (d *ddl) DropResourceGroup(ctx sessionctx.Context, stmt *ast.DropResourceGr
 		}
 		return err
 	}
-
-	// check to see if some user has dependency on the group
 	checker := privilege.GetPrivilegeManager(ctx)
 	if checker == nil {
 		return errors.New("miss privilege checker")
@@ -9063,12 +9006,9 @@ func buildResourceGroup(oldGroup *model.ResourceGroupInfo, options []*ast.Resour
 	groupInfo.ResourceGroupSettings.Adjust()
 	return groupInfo, nil
 }
-
-// AlterResourceGroup implements the DDL interface.
 func (d *ddl) AlterResourceGroup(ctx sessionctx.Context, stmt *ast.AlterResourceGroupStmt) (err error) {
 	groupName := stmt.ResourceGroupName
 	is := d.GetInfoSchemaWithInterceptor(ctx)
-	// Check group existence.
 	group, ok := is.ResourceGroupByName(groupName)
 	if !ok {
 		err := infoschema.ErrResourceGroupNotExists.GenWithStackByArgs(groupName)
@@ -9140,7 +9080,6 @@ func (d *ddl) DropPlacementPolicy(ctx sessionctx.Context, stmt *ast.DropPlacemen
 	}
 	policyName := stmt.PolicyName
 	is := d.GetInfoSchemaWithInterceptor(ctx)
-	// Check policy existence.
 	policy, ok := is.PolicyByName(policyName)
 	if !ok {
 		err = infoschema.ErrPlacementPolicyNotExists.GenWithStackByArgs(policyName)
@@ -9179,7 +9118,6 @@ func (d *ddl) AlterPlacementPolicy(ctx sessionctx.Context, stmt *ast.AlterPlacem
 	}
 	policyName := stmt.PolicyName
 	is := d.GetInfoSchemaWithInterceptor(ctx)
-	// Check policy existence.
 	policy, ok := is.PolicyByName(policyName)
 	if !ok {
 		return infoschema.ErrPlacementPolicyNotExists.GenWithStackByArgs(policyName)
@@ -9218,12 +9156,9 @@ func (d *ddl) AlterTableCache(sctx sessionctx.Context, ti ast.Ident) (err error)
 	if err != nil {
 		return err
 	}
-	// if a table is already in cache state, return directly
 	if t.Meta().TableCacheStatusType == model.TableCacheStatusEnable {
 		return nil
 	}
-
-	// forbidden cache table in system database.
 	if util.IsMemOrSysDB(schema.Name.L) {
 		return errors.Trace(dbterror.ErrUnsupportedAlterCacheForSysTable)
 	} else if t.Meta().TempTableType != model.TempTableNone {
@@ -9244,9 +9179,6 @@ func (d *ddl) AlterTableCache(sctx sessionctx.Context, ti ast.Ident) (err error)
 
 	ctx := kv.WithInternalSourceType(context.Background(), kv.InternalTxnDDL)
 	ddlQuery, _ := sctx.Value(sessionctx.QueryString).(string)
-	// Initialize the cached table meta lock info in `mysql.table_cache_meta`.
-	// The operation shouldn't fail in most cases, and if it does, return the error directly.
-	// This DML and the following DDL is not atomic, that's not a problem.
 	_, _, err = sctx.GetRestrictedSQLExecutor().ExecRestrictedSQL(ctx, nil,
 		"replace into mysql.table_cache_meta values (%?, 'NONE', 0, 0)", t.Meta().ID)
 	if err != nil {
@@ -9311,7 +9243,6 @@ func (d *ddl) AlterTableNoCache(ctx sessionctx.Context, ti ast.Ident) (err error
 	if err != nil {
 		return err
 	}
-	// if a table is not in cache state, return directly
 	if t.Meta().TableCacheStatusType == model.TableCacheStatusDisable {
 		return nil
 	}
@@ -9331,9 +9262,6 @@ func (d *ddl) AlterTableNoCache(ctx sessionctx.Context, ti ast.Ident) (err error
 	err = d.DoDDLJob(ctx, job)
 	return d.callHookOnChanged(job, err)
 }
-
-// checkTooBigFieldLengthAndTryAutoConvert will check whether the field length is too big
-// in non-strict mode and varchar column. If it is, will try to adjust to blob or text, see issue #30328
 func checkTooBigFieldLengthAndTryAutoConvert(tp *types.FieldType, colName string, sessVars *variable.SessionVars) error {
 	if sessVars != nil && !sessVars.SQLMode.HasStrictMode() && tp.GetType() == mysql.TypeVarchar {
 		err := types.IsVarcharTooBigFieldLength(tp.GetFlen(), colName, tp.GetCharset())
